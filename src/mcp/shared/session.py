@@ -215,15 +215,11 @@ class BaseSession(
             )
             await self._write_stream.send(JSONRPCMessage(jsonrpc_response))
 
-    def _should_validate_notification(self, message_root: JSONRPCNotification) -> bool:
+    def _is_cancellation_notification(self, message_root: JSONRPCNotification) -> bool:
         """
-        Determines if a notification should be validated.
-        Internal notifications (like notifications/cancelled) should be ignored.
+        Determines if a notification is a cancellation notification.
         """
-        return (
-            getattr(message_root, "method", None) != "notifications/cancelled" and
-            not self._closed
-        )
+        return getattr(message_root, "method", None) == "notifications/cancelled"
 
     async def _receive_loop(self) -> None:
         async with (
@@ -253,20 +249,22 @@ class BaseSession(
                     if not responder._responded:
                         await self._incoming_message_stream_writer.send(responder)
                 elif isinstance(message.root, JSONRPCNotification):
-                    if self._should_validate_notification(message.root):
-                        try:
-                            notification = self._receive_notification_type.model_validate(
-                                message.root.model_dump(
-                                    by_alias=True, mode="json", exclude_none=True
-                                )
-                            )
-                            if not self._closed:
-                                await self._received_notification(notification)
-                                await self._incoming_message_stream_writer.send(notification)
-                        except Exception:
-                            # Ignore validation errors for notifications during cleanup
-                            if not self._closed:
-                                raise
+                    # Always validate the notification to ensure it matches our model
+                    notification = self._receive_notification_type.model_validate(
+                        message.root.model_dump(
+                            by_alias=True, mode="json", exclude_none=True
+                        )
+                    )
+
+                    # Handle notifications differently based on their type
+                    if not self._closed:
+                        # Send internal notifications only to the handler
+                        if self._is_cancellation_notification(message.root):
+                            await self._received_notification(notification)
+                        # Forward other notifications to both handler and stream
+                        else:
+                            await self._received_notification(notification)
+                            await self._incoming_message_stream_writer.send(notification)
                 else:  # Response or error
                     stream = self._response_streams.pop(message.root.id, None)
                     if stream:
