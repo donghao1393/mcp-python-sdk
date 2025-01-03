@@ -249,22 +249,27 @@ class BaseSession(
                     if not responder._responded:
                         await self._incoming_message_stream_writer.send(responder)
                 elif isinstance(message.root, JSONRPCNotification):
-                    # Always validate the notification to ensure it matches our model
-                    notification = self._receive_notification_type.model_validate(
-                        message.root.model_dump(
-                            by_alias=True, mode="json", exclude_none=True
-                        )
-                    )
-
-                    # Handle notifications differently based on their type
-                    if not self._closed:
-                        # Send internal notifications only to the handler
-                        if self._is_cancellation_notification(message.root):
-                            await self._received_notification(notification)
-                        # Forward other notifications to both handler and stream
-                        else:
-                            await self._received_notification(notification)
-                            await self._incoming_message_stream_writer.send(notification)
+                    # check if it is a cancellation notification
+                    if self._is_cancellation_notification(message.root):
+                        if not self._closed:
+                            await self._received_notification(
+                                # Cancellation notifications do not need to be validated, pass the original message directly
+                                message.root
+                            )
+                    else:
+                        # if it is not a cancellation notification, validate the notification to ensure it matches our model
+                        try:
+                            notification = self._receive_notification_type.model_validate(
+                                message.root.model_dump(
+                                    by_alias=True, mode="json", exclude_none=True
+                                )
+                            )
+                            if not self._closed:
+                                await self._received_notification(notification)
+                                await self._incoming_message_stream_writer.send(notification)
+                        except Exception as e:
+                            # validation failed, log the error but don't break the loop
+                            await self._incoming_message_stream_writer.send(e)
                 else:  # Response or error
                     stream = self._response_streams.pop(message.root.id, None)
                     if stream:
